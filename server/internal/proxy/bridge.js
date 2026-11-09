@@ -31,6 +31,10 @@
   // Comment ids we already reported as `step-blocked`; cleared once the pin's
   // element becomes reachable so the parent can drop the now-stale alert.
   var blockedIds = {};
+  // Stable selectors resolved via the text-excerpt fallback, keyed by comment
+  // id. Used by renderPins so the pin lands on the element even when the
+  // stored selector itself no longer resolves.
+  var resolvedSelectors = {};
   // Wizard-replay progress tracking, used to detect when the wizard is gated
   // by validation/required fields and can't reach the target step.
   var replayStep = '';
@@ -55,7 +59,10 @@
     { key: 'vm', selector: '#view-vm.pf-m-active .ethan-detail-header__title', value: 'text' },
     // A PatternFly wizard is currently open/visible (overlay, modal, or
     // full-page). Its step is the separate `step` control above.
-    { key: 'wizard', selector: '.pf-v6-c-wizard, .pf-v5-c-wizard', value: 'visible' }
+    { key: 'wizard', selector: '.pf-v6-c-wizard, .pf-v5-c-wizard', value: 'visible' },
+    // A Settings subview opened from the app header (rhem-style apps). It has
+    // its own sidebar container and is not one of the top-level nav items.
+    { key: 'settings', selector: '.settings-sidebar-container', value: 'visible' }
   ];
 
   // Built-in view-replay rules for PatternFly apps. Each entry maps a control
@@ -64,6 +71,23 @@
   // value. `close` describes how to leave the subview when the comment was
   // recorded elsewhere. Pages can override this via window.__UXER_STATE__.reveal.
   var PF_DEFAULT_REVEAL = [
+    {
+      key: 'nav',
+      selector: '.pf-v6-c-nav__link, .pf-v5-c-nav__link',
+      value: 'text',
+      action: 'click'
+    },
+    {
+      key: 'tab',
+      selector: '.pf-v6-c-tabs__item .pf-v6-c-tabs__item-text, .pf-v5-c-tabs__item .pf-v5-c-tabs__item-text',
+      value: 'text',
+      action: 'click',
+      // Tabs often live inside a detail drawer/panel (e.g. a device detail).
+      // When the recorded tab is missing because that subview isn't open yet,
+      // open it first (the first row's link button) and let the view loop
+      // retry the tab match on the next pass.
+      open: { selector: 'table tbody tr .pf-v6-c-button.pf-m-link' }
+    },
     {
       key: 'vm',
       selector: '[data-open-vm]',
@@ -85,6 +109,12 @@
       selector: '.pf-v6-c-toggle-group__button, .pf-v5-c-toggle-group__button',
       value: 'attr:aria-label',
       action: 'click'
+    },
+    {
+      key: 'settings',
+      selector: '.pf-v6-c-button.pf-m-link:uxer-text("Settings")',
+      action: 'open',
+      close: { selector: '.pf-v6-c-nav__link:uxer-text("Overview")' }
     }
   ];
 
@@ -155,17 +185,20 @@
   // from one breaks as soon as the page reloads. These include PatternFly's
   // `pf-random-id-_r_16_` / `pf-nav-expandable-_r_f_` (a `_r_XX_` useId
   // suffix) and React 19's `:rN:` form. Treat them as unstable and fall back
-  // to a structural path (or a stable attribute) instead.
+  // to a structural path (or a stable attribute) instead. PatternFly's
+  // auto-generated OUIA ids (`OUIA-Generated-*`) change on every render too.
   function isUnstableId(id) {
     return /^pf-random-id-/.test(id) ||
            /_r_[0-9a-z]+_$/i.test(id) ||
-           /^:r\d+:/.test(id);
+           /^:r\d+:/.test(id) ||
+           /^OUIA-Generated-/.test(id);
   }
 
   function isUnstableValue(v) {
     return /^pf-random-id-/.test(v) ||
            /_r_[0-9a-z]+_$/i.test(v) ||
-           /:r\d+:/.test(v);
+           /:r\d+:/.test(v) ||
+           /^OUIA-Generated-/.test(v);
   }
 
   function escapeAttr(v) {
@@ -265,6 +298,24 @@
   function findElement(sel) {
     var all = queryAll(sel);
     return all.length ? all[0] : null;
+  }
+
+  // Fall back to the captured text excerpt when a stored selector no longer
+  // resolves (e.g. it anchored on an auto-generated PatternFly OUIA id that
+  // changes on every render). Prefers the smallest element whose normalized
+  // text matches the excerpt exactly.
+  function findByText(text) {
+    if (typeof text !== 'string' || !text) return null;
+    var t = text.replace(/\s+/g, ' ').trim();
+    if (!t) return null;
+    var best = null;
+    var all = document.querySelectorAll('body *');
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      if (normalizeText(el) !== t) continue;
+      if (!best || (el.textContent || '').length < (best.textContent || '').length) best = el;
+    }
+    return best;
   }
 
   // The nearest short-text "label" descendant of a wrapper (a form/detail
@@ -709,13 +760,15 @@
       // While a thread is open, show only that comment's pin.
       if (pendingId != null && !isPending) continue;
       // Only render pins that belong to the current page. Pins with no url
-      // (legacy) are shown everywhere.
-      if (p.url && cur && pageKey(p.url) !== cur) continue;
+      // (legacy) are shown everywhere. The pending (focused) pin is exempt so
+      // it stays visible while the page hasn't navigated to it yet.
+      if (p.url && cur && !isPending && pageKey(p.url) !== cur) continue;
       // Only render pins whose recorded view state matches the current one.
       // The pending (focused) pin is exempt so it stays visible while the
       // page hasn't reached its state yet.
       if (p.state && st.key && !isPending && !pinStateMatches(p.state, st.key)) continue;
-      var el = findElement(p.selector);
+      var pinSelector = resolvedSelectors[p.id] || p.selector;
+      var el = findElement(pinSelector);
       if (!el) {
         // Element not rendered (e.g. collapsed accordion): keep a fallback
         // pin so the comment stays discoverable.
@@ -751,7 +804,7 @@
       // also covers the blocked→found transition, where focusSelector never
       // got a chance to place the border.
       if (isPending) {
-        activeHighlight = p.selector;
+        activeHighlight = pinSelector;
         activeHighlightPage = currentPage();
         positionHighlight(el);
         if (highlightTimer) { clearTimeout(highlightTimer); highlightTimer = null; }
@@ -774,6 +827,12 @@
     dot.textContent = String(p.index);
     dot.style.left = pos.left + 'px';
     dot.style.top = pos.top + 'px';
+    dot.style.pointerEvents = 'auto';
+    dot.style.cursor = 'pointer';
+    dot.addEventListener('click', function (e) {
+      e.stopPropagation();
+      post('pin-click', { id: p.id });
+    });
     pinsLayer.appendChild(dot);
   }
 
@@ -839,13 +898,14 @@
     } else if (d.type === 'focus') {
       if (d.persist && d.id) pendingId = d.id;
       renderPins();
-      focusWithStep(d.selector, d.step, 20, d.persist, d.id, d.state);
+      focusWithStep(d.selector, d.step, 20, d.persist, d.id, d.state, d.text);
     } else if (d.type === 'navigate') {
       if (d.persist && d.id) pendingId = d.id;
       renderPins();
-      navigateTo(d.url, d.selector, d.step, d.persist, d.id, d.state);
+      navigateTo(d.url, d.selector, d.step, d.persist, d.id, d.state, d.text);
     } else if (d.type === 'clear') {
       pendingId = null;
+      resolvedSelectors = {};
       renderPins();
       clearHighlight();
     }
@@ -895,12 +955,23 @@
     return closed;
   }
 
-  function focusSelector(selector, retries, persist, onMissing) {
+  function focusSelector(selector, retries, persist, onMissing, text) {
     if (typeof retries !== 'number') retries = 0;
+    var highlightSel = selector;
     var el = findElement(selector);
+    if (!el && text) {
+      // The stored selector is stale (e.g. anchored on a generated OUIA id):
+      // fall back to the captured text excerpt and remember a stable selector
+      // for the pin overlay.
+      el = findByText(text);
+      if (el) {
+        highlightSel = uniqueSelector(el);
+        if (pendingId) resolvedSelectors[pendingId] = highlightSel;
+      }
+    }
     if (!el) {
       if (retries > 0) {
-        setTimeout(function () { focusSelector(selector, retries - 1, persist, onMissing); }, 150);
+        setTimeout(function () { focusSelector(selector, retries - 1, persist, onMissing, text); }, 150);
       } else if (typeof onMissing === 'function') {
         onMissing();
       }
@@ -910,12 +981,12 @@
     // comment actually becomes visible.
     if (!isInsideOpenModal(el) && closeOpenModals()) {
       if (retries > 0) {
-        setTimeout(function () { focusSelector(selector, retries - 1, persist, onMissing); }, 150);
+        setTimeout(function () { focusSelector(selector, retries - 1, persist, onMissing, text); }, 150);
       }
       return;
     }
     try { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {}
-    activeHighlight = selector;
+    activeHighlight = highlightSel;
     activeHighlightPage = currentPage();
     positionHighlight(el);
     if (highlightTimer) { clearTimeout(highlightTimer); highlightTimer = null; }
@@ -944,8 +1015,11 @@
         try { window[entry.call].apply(window, entry.args || []); return true; } catch (e) {}
       }
       if (entry.selector) {
-        var openEl = document.querySelector(entry.selector);
-        if (openEl && !openEl.disabled) { openEl.click(); return true; }
+        // queryAll supports the :uxer-text() constraint, so a text-anchored
+        // opener (e.g. the header "Settings" button) can be matched without a
+        // stable id.
+        var openEls = queryAll(entry.selector);
+        if (openEls.length && !openEls[0].disabled) { openEls[0].click(); return true; }
       }
       return false;
     }
@@ -960,6 +1034,10 @@
           return true;
         }
       }
+      // The control's elements are missing entirely (e.g. tabs inside a
+      // closed detail drawer): open the subview that contains them and let
+      // the next view loop retry the match.
+      if (cands.length === 0 && entry.open && performClose(entry.open)) return true;
     }
     return false;
   }
@@ -983,13 +1061,13 @@
   // wizardNextButton for the step replay; when the wizard can't advance
   // because required fields / validation block it, we post a `step-blocked`
   // message with guidance instead of polling until the budget runs out.
-  function focusWithStep(selector, step, retries, persist, id, state) {
+  function focusWithStep(selector, step, retries, persist, id, state, text) {
     replayStep = '';
     replayStuck = 0;
     // Each focus attempt re-detects blocks from scratch, matching the parent
     // clearing its per-comment blocked state on click.
     if (id) delete blockedIds[id];
-    viewLoop(selector, step, state, retries, persist, id);
+    viewLoop(selector, step, state, retries, persist, id, text);
   }
 
   // Ensure every recorded subview value with a reveal rule matches the current
@@ -997,7 +1075,7 @@
   // absent from `state` but currently open are closed (e.g. leaving a VM
   // detail back to its list). Once all views match, hand off to the
   // wizard-step loop, which focuses the selector.
-  function viewLoop(selector, step, state, retries, persist, id) {
+  function viewLoop(selector, step, state, retries, persist, id, text) {
     var recorded = parseState(state);
     var controls = activeControls() || [];
     var reveal = activeReveal();
@@ -1020,7 +1098,7 @@
     }
 
     if (todo.length === 0) {
-      stepLoop(selector, step, retries, persist, id);
+      stepLoop(selector, step, retries, persist, id, text);
       return;
     }
 
@@ -1034,7 +1112,7 @@
     }
 
     if (retries > 0) {
-      setTimeout(function () { viewLoop(selector, step, state, retries - 1, persist, id); }, 200);
+      setTimeout(function () { viewLoop(selector, step, state, retries - 1, persist, id, text); }, 200);
     } else {
       // Retries exhausted: report any wizard subview we couldn't open so the
       // reviewer can open it manually.
@@ -1051,7 +1129,7 @@
           });
         }
       }
-      stepLoop(selector, step, 10, persist, id);
+      stepLoop(selector, step, 10, persist, id, text);
     }
   }
 
@@ -1120,35 +1198,96 @@
     tryNext();
   }
 
-  // Focus with a short retry budget first; if the element never shows up, try
-  // the alternate layout(s) before spending the rest of the budget.
-  function focusWithFallback(selector, retries, persist) {
-    if (typeof retries !== 'number') retries = 0;
-    var first = Math.min(retries, 8);
-    focusSelector(selector, first, persist, function () {
-      viewFallback(selector, function (switched) {
-        if (switched) focusSelector(selector, 20, persist);
-        else focusSelector(selector, Math.max(0, retries - first), persist);
-      });
-    });
+  // Known subviews that aren't tracked by a declarative control in older
+  // comments. When a comment's element can't be found after replaying its
+  // recorded state, try opening these in turn (when closed) and keep the first
+  // one where the selector — or the captured text excerpt — resolves.
+  var SUBVIEW_OPENERS = [
+    {
+      open: '.pf-v6-c-button.pf-m-link:uxer-text("Settings")',
+      control: '.settings-sidebar-container',
+      close: '.pf-v6-c-nav__link:uxer-text("Overview")'
+    }
+  ];
+
+  // Poll briefly for the element by selector first, then by text excerpt.
+  function waitForTarget(selector, text, tries, cb) {
+    if (findElement(selector) || (text && findByText(text))) { cb(true); return; }
+    if (tries <= 0) { cb(false); return; }
+    setTimeout(function () { waitForTarget(selector, text, tries - 1, cb); }, 150);
   }
 
-  function stepLoop(selector, step, retries, persist, id) {
+  // Try each closed subview opener; when the target appears inside one, leave
+  // it open and report success. Otherwise restore the page and report failure.
+  function trySubviews(selector, text, done) {
+    var subs = SUBVIEW_OPENERS.slice();
+    function next() {
+      if (!subs.length) { done(false); return; }
+      var sub = subs.shift();
+      if (document.querySelector(sub.control)) { next(); return; }
+      var opener = findElement(sub.open);
+      if (!opener) { next(); return; }
+      opener.click();
+      waitForTarget(selector, text, 10, function (found) {
+        if (found) { done(true); return; }
+        var closer = findElement(sub.close);
+        if (closer) closer.click();
+        setTimeout(next, 200);
+      });
+    }
+    next();
+  }
+
+  // Focus with a short retry budget first; if the element never shows up, try
+  // the alternate layout(s) before spending the rest of the budget. When the
+  // element still can't be found after every attempt, report it to the parent
+  // (for the comment whose thread is open) so the thread can surface guidance
+  // instead of failing silently.
+  function focusWithFallback(selector, retries, persist, text) {
+    if (typeof retries !== 'number') retries = 0;
+    var first = Math.min(retries, 8);
+    function reportNotFound() {
+      if (pendingId && !blockedIds[pendingId]) {
+        blockedIds[pendingId] = true;
+        post('step-blocked', {
+          id: pendingId,
+          selector: selector,
+          reason: 'element-not-found'
+        });
+      }
+    }
+    focusSelector(selector, first, persist, function () {
+      viewFallback(selector, function (switched) {
+        if (switched) {
+          focusSelector(selector, 20, persist, reportNotFound, text);
+        } else {
+          focusSelector(selector, Math.max(0, retries - first), persist, function () {
+            trySubviews(selector, text, function (found) {
+              if (found) focusSelector(selector, 20, persist, reportNotFound, text);
+              else reportNotFound();
+            });
+          }, text);
+        }
+      });
+    }, text);
+  }
+
+  function stepLoop(selector, step, retries, persist, id, text) {
     if (!step) {
-      focusWithFallback(selector, retries, persist);
+      focusWithFallback(selector, retries, persist, text);
       return;
     }
 
     if (currentStepKey() === step) {
-      focusWithFallback(selector, 30, persist);
+      focusWithFallback(selector, 30, persist, text);
       return;
     }
 
     function schedule() {
       if (retries > 0) {
-        setTimeout(function () { stepLoop(selector, step, retries - 1, persist, id); }, 250);
+        setTimeout(function () { stepLoop(selector, step, retries - 1, persist, id, text); }, 250);
       } else {
-        focusWithFallback(selector, 10, persist);
+        focusWithFallback(selector, 10, persist, text);
       }
     }
 
@@ -1225,7 +1364,7 @@
   // Client-side navigate the SPA to a design URL, then focus an element. The
   // design's router basename is already the persona origin's root, so the
   // target is the design pathname as-is.
-  function navigateTo(url, selector, step, persist, id, state) {
+  function navigateTo(url, selector, step, persist, id, state, text) {
     try {
       var a = new URL(url, window.location.href);
       var path = a.pathname + a.search + a.hash;
@@ -1234,7 +1373,7 @@
         history.pushState({}, '', path);
         window.dispatchEvent(new PopStateEvent('popstate', { state: history.state }));
       }
-      if (selector) focusWithStep(selector, step, 40, persist, id, state);
+      if (selector) focusWithStep(selector, step, 40, persist, id, state, text);
       return true;
     } catch (e) { return false; }
   }

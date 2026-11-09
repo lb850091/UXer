@@ -91,5 +91,8 @@ export function blockedHint(t: TFunction, info: BlockedInfo): string {
   if (info.reason === 'wizard-not-open') {
     return t('comments.blockedHintWizardNotOpen', { label });
   }
+  if (info.reason === 'element-not-found') {
+    return t('comments.blockedHintElementNotFound');
+  }
   return t('comments.blockedHintMissingFields', { label });
 }

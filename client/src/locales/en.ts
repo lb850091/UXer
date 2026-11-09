@@ -145,6 +145,8 @@ export default {
       'This comment is inside the creation wizard. Open the wizard and go to the “{{label}}” step — the pin will appear there.',
     blockedHintMissingFields:
       "The wizard can't reach “{{label}}” automatically — a required field is missing or invalid. Click through the wizard (filling in required fields) to the “{{label}}” step and the pin will appear there.",
+    blockedHintElementNotFound:
+      "This comment's element isn't visible on the current page. Open the page or section where the comment was left — the pin will appear there.",
     thatStep: 'that step',
   },
   filters: {

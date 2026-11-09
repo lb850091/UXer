@@ -2,6 +2,11 @@ import type { Page } from '@playwright/test';
 
 export const OSAC_URL = 'https://osac-project.github.io/osac-ux/';
 
+// The RHEM device-management prototype: a PatternFly app whose sections
+// (Overview / Fleets / Devices / Repositories) share one URL and are switched
+// by the PF nav, and whose device detail is a PF drawer with PF tabs.
+export const RHEM_URL = 'https://pamparan.github.io/rhem-design/';
+
 // The VM list / detail / creation-wizard prototype, used by the view-routing
 // specs (same-origin subviews that don't change the URL).
 export const VMAS_URL = 'https://osac-project.github.io/osac-ux/vmaas-ux-prototype.html';

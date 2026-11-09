@@ -67,6 +67,12 @@ export interface RevealControl {
   call?: string;
   /** Arguments passed to `call` (used with action 'open'). */
   args?: unknown[];
+  /**
+   * When the control's candidate elements are entirely missing (they live in
+   * a subview that isn't open yet), open that subview first — via `call` or
+   * by clicking `selector` — and retry the match on the next view loop.
+   */
+  open?: RevealClose;
   /** How to leave this subview when the comment was recorded elsewhere. */
   close?: RevealClose;
 }
@@ -90,6 +96,7 @@ export type ParentMessage =
       state?: string;
       persist?: boolean;
       id?: string;
+      text?: string;
     }
   | {
       source: 'uxer';
@@ -100,6 +107,7 @@ export type ParentMessage =
       state?: string;
       persist?: boolean;
       id?: string;
+      text?: string;
     }
   | { source: 'uxer'; type: 'clear' };
 
@@ -108,6 +116,7 @@ export type BridgeMessage =
   | { source: 'uxer-bridge'; type: 'ready'; url: string }
   | { source: 'uxer-bridge'; type: 'anchor'; anchor: Anchor }
   | { source: 'uxer-bridge'; type: 'location'; url: string }
+  | { source: 'uxer-bridge'; type: 'pin-click'; id: string }
   | {
       source: 'uxer-bridge';
       type: 'step-blocked';

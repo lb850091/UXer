@@ -58,6 +58,7 @@ export default function PreviewPage() {
   const [error, setError] = useState<string | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const pinsRef = useRef<Pin[]>([]);
+  const commentsRef = useRef<Comment[]>([]);
 
   const reload = useCallback(
     async (id: string) => {
@@ -116,6 +117,12 @@ export default function PreviewPage() {
       if (d.type === 'anchor') {
         setPendingAnchor(d.anchor);
         setCommentMode(false);
+      } else if (d.type === 'pin-click') {
+        const clicked = commentsRef.current.find((c) => c.id === d.id) ?? null;
+        if (clicked) {
+          setDetailId(clicked.id);
+          setCommentMode(false);
+        }
       } else if (d.type === 'ready') {
         setCurrentUrl(typeof d.url === 'string' ? d.url : '');
         // The bridge (re)loaded: restore pins.
@@ -183,10 +190,18 @@ export default function PreviewPage() {
   useEffect(() => {
     if (!comments) return;
     pinsRef.current = pins;
+    commentsRef.current = comments;
     sendToBridge(iframeRef.current?.contentWindow ?? null, { source: 'uxer', type: 'pins', pins });
   }, [pins, comments]);
 
-  const sendFocus = (selector: string, persist = false, step = '', id = '', state = '') => {
+  const sendFocus = (
+    selector: string,
+    persist = false,
+    step = '',
+    id = '',
+    state = '',
+    text = '',
+  ) => {
     sendToBridge(iframeRef.current?.contentWindow ?? null, {
       source: 'uxer',
       type: 'focus',
@@ -195,6 +210,7 @@ export default function PreviewPage() {
       state,
       persist,
       id,
+      text,
     });
   };
 
@@ -219,12 +235,12 @@ export default function PreviewPage() {
     const state = c.state || '';
     // No page URL recorded (legacy): just focus on the current page.
     if (!target) {
-      sendFocus(c.selector, persist, step, c.id, state);
+      sendFocus(c.selector, persist, step, c.id, state, c.text_excerpt);
       return;
     }
     // Already on the comment's page: just focus the element.
     if (currentUrl === target) {
-      sendFocus(c.selector, persist, step, c.id, state);
+      sendFocus(c.selector, persist, step, c.id, state, c.text_excerpt);
       return;
     }
     // Navigate the SPA client-side via the bridge (same origin). Deep links
@@ -247,6 +263,7 @@ export default function PreviewPage() {
         state,
         persist,
         id: c.id,
+        text: c.text_excerpt,
       });
     } else {
       iframeRef.current!.src = `/proxy?url=${encodeURIComponent(target)}`;
